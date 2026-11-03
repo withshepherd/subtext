@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 import yaml
 from typer.testing import CliRunner
 
@@ -73,6 +74,7 @@ def _make_dbt_project(tmp_path: Path) -> tuple[Path, Path]:
                             "amount": {"name": "amount"},
                         },
                         "config": {"materialized": "view"},
+                        "tags": ["subtext_exclude"],
                     },
                     "model.jaffle_shop.fct_orders": {
                         "resource_type": "model",
@@ -89,6 +91,8 @@ def _make_dbt_project(tmp_path: Path) -> tuple[Path, Path]:
                             "net_amount": {"name": "net_amount"},
                         },
                         "config": {"materialized": "table"},
+                        "tags": ["reporting"],
+                        "depends_on": {"nodes": ["model.jaffle_shop.stg_orders"]},
                     },
                     "model.jaffle_shop.ephemeral": {
                         "resource_type": "model",
@@ -754,7 +758,11 @@ def test_upgrade_cli_v4_to_v5_dry_run_no_write(tmp_path):
 # ── wren context import dbt ───────────────────────────────────────────────
 
 
-def test_import_dbt_dry_run(tmp_path):
+@pytest.mark.parametrize(
+    "tags, excluded_count",
+    [([], 0), (["subtext_exclude"], 1), (["subtext_exclude", "reporting"], 2)],
+)
+def test_import_dbt_dry_run(tmp_path, tags, excluded_count):
     dbt_project, profiles_path = _make_dbt_project(tmp_path)
     output_dir = tmp_path / "wren_project"
 
@@ -771,13 +779,16 @@ def test_import_dbt_dry_run(tmp_path):
             "--path",
             str(output_dir),
             "--dry-run",
+            *[arg for tag in tags for arg in ("--exclude-tag", tag)],
         ],
     )
 
     assert result.exit_code == 0, result.output
     assert "Dry run" in result.output
     assert "wren_project.yml" in result.output
-    assert "models/fct_orders/metadata.yml" in result.output
+    assert ("models/stg_orders/metadata.yml" in result.output) == (excluded_count == 0)
+    assert ("models/fct_orders/metadata.yml" in result.output) == (excluded_count < 2)
+    assert f"excluded {excluded_count} resource(s) by tag" in result.output
     assert not output_dir.exists()
 
 
@@ -837,6 +848,9 @@ def test_import_dbt_force_overwrites_managed_files(tmp_path):
     output_dir = tmp_path / "wren_project"
     output_dir.mkdir()
     (output_dir / "wren_project.yml").write_text("name: old\n")
+    stale_model = output_dir / "models" / "stg_orders" / "metadata.yml"
+    stale_model.parent.mkdir(parents=True)
+    stale_model.write_text("name: stg_orders\n")
 
     result = runner.invoke(
         app,
@@ -868,10 +882,15 @@ def test_import_dbt_force_overwrites_managed_files(tmp_path):
             "--path",
             str(output_dir),
             "--force",
+            "--exclude-tag",
+            "subtext_exclude",
         ],
     )
     assert forced.exit_code == 0, forced.output
     assert "jaffle_shop" in (output_dir / "wren_project.yml").read_text()
+    assert not (output_dir / "models" / "stg_orders").exists()
+    assert (output_dir / "models" / "fct_orders" / "metadata.yml").exists()
+    assert "excluded 1 resource(s) by tag" in forced.output
     sql_files = list((output_dir / "knowledge" / "sql").glob("*.md"))
     contents = [f.read_text() for f in sql_files]
     assert any("source: dbt" in c for c in contents)
