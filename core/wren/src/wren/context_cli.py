@@ -81,6 +81,13 @@ def import_cmd(
         Optional[str],
         typer.Option("--target", help="dbt target name override."),
     ] = None,
+    exclude_tags: Annotated[
+        Optional[list[str]],
+        typer.Option(
+            "--exclude-tag",
+            help="Exclude dbt models and sources with this exact tag. Repeat to match any tag.",
+        ),
+    ] = None,
     dry_run: Annotated[
         bool,
         typer.Option("--dry-run", help="Preview generated files without writing."),
@@ -114,6 +121,7 @@ def import_cmd(
             profiles_path=profiles_path,
             profile_name=profile_name,
             target_name=target_name,
+            exclude_tags=exclude_tags,
         )
     except DbtLoadError as exc:
         typer.echo(f"Error: {exc}", err=True)
@@ -135,6 +143,7 @@ def import_cmd(
         f"  {imported.model_count} dbt models, {imported.source_count} sources, "
         f"{imported.relationship_count} relationships"
     )
+    typer.echo(f"  excluded {imported.excluded_by_tag} resource(s) by tag")
     if imported.skipped_ephemeral:
         typer.echo(f"  skipped {imported.skipped_ephemeral} ephemeral model(s)")
     if imported.skipped_without_columns:

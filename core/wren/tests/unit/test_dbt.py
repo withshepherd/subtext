@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 import yaml
@@ -395,6 +396,99 @@ class TestLoadDbtArtifacts:
 
         with pytest.raises(DbtLoadError, match="dbt docs generate"):
             load_dbt_artifacts(project_dir)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "exclude_tags, excluded_names",
+    [
+        (None, set()),
+        ([], set()),
+        (["subtext_exclude"], {"orders"}),
+        (["private"], {"raw_internal"}),
+        (["subtext_exclude", "private"], {"orders", "raw_internal"}),
+        (["subtext_exclude", "subtext_exclude"], {"orders"}),
+    ],
+)
+def test_import_excludes_tags_without_cascading(
+    tmp_path, monkeypatch, exclude_tags, excluded_names
+):
+    project_dir, profiles_path = _write_basic_dbt_project(tmp_path)
+    monkeypatch.setenv("JAFFLE_DUCKDB_PATH", "warehouse/jaffle.duckdb")
+    manifest_path = project_dir / "build" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    orders_uid = "model.jaffle_shop.orders"
+    report_uid = "model.jaffle_shop.report"
+    # Resolved manifest tags include inherited config; no source YAML is needed.
+    manifest["nodes"][orders_uid]["tags"] = ["subtext_exclude"]
+    manifest["nodes"][report_uid] = {
+        "resource_type": "model",
+        "name": "report",
+        "alias": "orders_report",
+        "database": "warehouse",
+        "schema": "mart",
+        "config": {"materialized": "table"},
+        "depends_on": {"nodes": [orders_uid]},
+        "columns": {"id": {"data_type": "integer"}},
+    }
+    manifest["sources"] = {
+        f"source.jaffle_shop.raw.{name}": {
+            "resource_type": "source",
+            "name": name,
+            "tags": tags,
+            "columns": {"id": {"data_type": "integer"}},
+        }
+        for name, tags in [
+            ("internal", ["private"]),
+            ("customers", ["Subtext_exclude", "subtext_exclude_extra"]),
+        ]
+    }
+    for target_uid in [orders_uid, *manifest["sources"]]:
+        manifest["nodes"][f"test.relationships.{target_uid}"] = {
+            "resource_type": "test",
+            "attached_node": report_uid,
+            "column_name": "id",
+            "depends_on": {"nodes": [report_uid, target_uid]},
+            "test_metadata": {"name": "relationships", "kwargs": {"field": "id"}},
+        }
+    manifest_path.write_text(json.dumps(manifest))
+
+    imported = convert_dbt_project_to_wren_project(
+        project_dir, profiles_path=profiles_path, exclude_tags=exclude_tags
+    )
+    files = {file.relative_path: file.content for file in imported.files}
+    retained_names = {
+        "orders",
+        "orders_report",
+        "raw_internal",
+        "raw_customers",
+    } - excluded_names
+    assert {path for path in files if path.startswith("models/")} == {
+        f"models/{name}/metadata.yml" for name in retained_names
+    }
+    assert imported.excluded_by_tag == len(excluded_names)
+    assert imported.model_count == 2 - ("orders" in excluded_names)
+    assert imported.source_count == 2 - ("raw_internal" in excluded_names)
+    report = yaml.safe_load(files["models/orders_report/metadata.yml"])
+    assert report["table_reference"] == {
+        "catalog": "warehouse",
+        "schema": "mart",
+        "table": "orders_report",
+    }
+    assert "ref_sql" not in report
+    relationships = yaml.safe_load(files["relationships.yml"])["relationships"]
+    assert {tuple(rel["models"]) for rel in relationships} == {
+        ("orders_report", name) for name in retained_names - {"orders_report"}
+    }
+    assert imported.relationship_count == len(relationships)
+    queries = [
+        content for path, content in files.items() if path.startswith("knowledge/sql/")
+    ]
+    assert queries
+    for name in excluded_names:
+        assert all(
+            re.search(rf"\b{re.escape(name)}\b", query) is None for query in queries
+        )
 
 
 @pytest.mark.unit

@@ -18,8 +18,8 @@ Wren stores imported dbt context in regular Wren project files:
 | Model and source nodes | `models/*/metadata.yml` | Preserves model names, table references, descriptions, layers, and columns |
 | `relationships` tests | `relationships.yml` | Turns tested dbt refs into explicit Wren join paths |
 | `not_null`, `unique`, `accepted_values` tests | Model and column metadata | Gives agents verified constraints and useful filter values |
-| Test results | `instructions.md` | Surfaces verified constraints and warnings for agent workflows |
-| Model graph and metadata | `queries.yml` | Seeds memory with dbt-aware example questions and SQL |
+| Test results | `knowledge/rules/general.md` | Surfaces verified constraints and warnings for agent workflows |
+| Model graph and metadata | `knowledge/sql/*.md` | Seeds memory with dbt-aware example questions and SQL |
 
 The generated `wren_project.yml` also keeps a `dbt` binding:
 
@@ -101,11 +101,73 @@ Generated files:
 | `wren_project.yml` | Project metadata, data source, and dbt binding |
 | `models/*/metadata.yml` | Imported dbt models and sources |
 | `relationships.yml` | Joins inferred from dbt `relationships` tests |
-| `instructions.md` | dbt test summary, verified constraints, and warnings |
+| `knowledge/rules/general.md` | dbt test summary, verified constraints, and warnings |
 | `AGENTS.md` | Agent workflow guidance |
-| `queries.yml` | dbt-derived seed NL-SQL pairs for memory indexing |
+| `knowledge/sql/*.md` | dbt-derived seed NL-SQL pairs for memory indexing |
 
 The importer skips ephemeral models, nodes without catalog columns, and manifest-only columns that are not present in `catalog.json`.
+
+### Exclude Models and Sources by Tag
+
+Use the optional, repeatable `--exclude-tag` flag to omit models and sources
+whose resolved tags in `manifest.json` match any supplied tag exactly. This
+includes tags inherited through dbt configuration. Without the flag, the
+importer keeps its existing selection behavior. `subtext_exclude` is a suggested
+convention; the importer has no default exclusion tag.
+
+For example, tag an internal model in a dbt model properties YAML file:
+
+```yaml
+models:
+  - name: internal_reconciliation
+    config:
+      tags: [subtext_exclude]
+```
+
+Regenerate the dbt artifacts with `dbt build` and `dbt docs generate`, then import
+into a clean output directory:
+
+```bash
+wren context import dbt \
+  --project-dir ./dbt \
+  --path ./build/project \
+  --exclude-tag subtext_exclude
+```
+
+Repeat the flag to exclude resources matching **any** of several tags:
+
+```bash
+wren context import dbt \
+  --project-dir ./dbt \
+  --path ./build/project \
+  --exclude-tag subtext_exclude \
+  --exclude-tag internal_only \
+  --dry-run
+```
+
+Both imports and dry runs report the excluded-resource count. Programmatic
+imports accept the same selection through
+`convert_dbt_project_to_wren_project(..., exclude_tags=["subtext_exclude"])`.
+
+Exclusions apply only to matching resources. Untagged materialized downstream
+dbt models remain queryable through their own warehouse tables or views, and
+the warehouse handles their dependencies on excluded resources. The importer
+omits relationships involving excluded resources and generates query examples
+from the retained catalog. Maintained Subtext semantic views or cubes that
+reference an excluded semantic model may need adjustment.
+
+Exclusions take effect when you regenerate, build, and deploy the context.
+They remove semantic definitions; they do not establish a database authorization
+boundary. Database permissions still govern access to the physical relations.
+
+Use a fresh, dedicated import directory for each regeneration so previously
+generated files cannot keep excluded models or query examples in the catalog.
+The existing `--force` workflow clears the entire `models/` and `views/`
+directories and replaces relationships and project metadata, so preserve any
+maintained definitions separately. It leaves old `knowledge/sql/` examples and
+legacy `queries.yml` files in place. Importing into a fresh directory avoids
+those stale files; then restore maintained definitions after reviewing their
+references, build the context, and deploy it.
 
 ## dbt Test Mapping
 
@@ -142,7 +204,7 @@ If memory is installed, index the imported project:
 wren memory index --path ./wren-project
 ```
 
-The memory index includes dbt descriptions, layers, test status, accepted values, and seed pairs from `queries.yml`.
+The memory index includes dbt descriptions, layers, test status, accepted values, and seed pairs from `knowledge/sql/*.md`.
 
 ## Complete DuckDB Example
 

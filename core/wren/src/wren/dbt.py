@@ -99,6 +99,7 @@ class DbtProjectImport:
     skipped_ephemeral: int
     skipped_without_columns: int
     relationship_count: int = 0
+    excluded_by_tag: int = 0
 
 
 def default_wren_profile_name(target: DbtTarget) -> str:
@@ -320,8 +321,13 @@ def convert_dbt_project_to_wren_project(
     profiles_path: str | Path | None = None,
     profile_name: str | None = None,
     target_name: str | None = None,
+    exclude_tags: list[str] | None = None,
 ) -> DbtProjectImport:
-    """Convert dbt artifacts into Wren project files."""
+    """Convert dbt artifacts into Wren project files.
+
+    Exclude models and sources whose resolved manifest tags match any
+    ``exclude_tags`` entry exactly, without excluding their dependencies.
+    """
     from wren.context import (  # noqa: PLC0415
         _AGENTS_MD_TEMPLATE,
         ProjectFile,
@@ -346,7 +352,8 @@ def convert_dbt_project_to_wren_project(
         source_count,
         skipped_ephemeral,
         skipped_no_columns,
-    ) = _build_imported_models(artifacts)
+        excluded_by_tag,
+    ) = _build_imported_models(artifacts, exclude_tags=set(exclude_tags or []))
     relationships, test_events = _apply_dbt_test_enrichment(artifacts, imported_models)
     query_pairs = _build_dbt_query_pairs(
         imported_models,
@@ -447,6 +454,7 @@ def convert_dbt_project_to_wren_project(
         skipped_ephemeral=skipped_ephemeral,
         skipped_without_columns=skipped_no_columns,
         relationship_count=len(relationships),
+        excluded_by_tag=excluded_by_tag,
     )
 
 
@@ -690,7 +698,9 @@ def _bigquery_credentials_base64(output: dict[str, Any]) -> str:
 
 def _build_imported_models(
     artifacts: DbtArtifacts,
-) -> tuple[list[dict[str, Any]], int, int, int, int]:
+    *,
+    exclude_tags: set[str],
+) -> tuple[list[dict[str, Any]], int, int, int, int, int]:
     manifest = artifacts.manifest
     catalog_nodes = artifacts.catalog.get("nodes", {})
     catalog_sources = artifacts.catalog.get("sources", {})
@@ -702,9 +712,13 @@ def _build_imported_models(
     source_count = 0
     skipped_ephemeral = 0
     skipped_without_columns = 0
+    excluded_by_tag = 0
 
     for unique_id, node in sorted(manifest.get("nodes", {}).items()):
         if node.get("resource_type") != "model":
+            continue
+        if exclude_tags.intersection(node.get("tags", [])):
+            excluded_by_tag += 1
             continue
         if str(node.get("config", {}).get("materialized", "")).lower() == "ephemeral":
             skipped_ephemeral += 1
@@ -725,6 +739,9 @@ def _build_imported_models(
         model_count += 1
 
     for unique_id, node in sorted(manifest.get("sources", {}).items()):
+        if exclude_tags.intersection(node.get("tags", [])):
+            excluded_by_tag += 1
+            continue
         source_name = _choose_source_model_name(node, used_names)
         model = _build_model_metadata(
             unique_id=unique_id,
@@ -747,6 +764,7 @@ def _build_imported_models(
         source_count,
         skipped_ephemeral,
         skipped_without_columns,
+        excluded_by_tag,
     )
 
 
