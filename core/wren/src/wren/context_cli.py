@@ -85,7 +85,7 @@ def import_cmd(
         Optional[list[str]],
         typer.Option(
             "--exclude-tag",
-            help="Exclude dbt models and sources with this exact tag. Repeat to match any tag.",
+            help="Exclude dbt models, seeds, and sources with this exact tag. Repeat to match any tag.",
         ),
     ] = None,
     dry_run: Annotated[
@@ -140,7 +140,8 @@ def import_cmd(
         typer.echo(f"Imported dbt project to Wren project at {output_path}/")
 
     typer.echo(
-        f"  {imported.model_count} dbt models, {imported.source_count} sources, "
+        f"  {imported.model_count} dbt models, {imported.seed_count} seeds, "
+        f"{imported.source_count} sources, "
         f"{imported.relationship_count} relationships"
     )
     typer.echo(f"  excluded {imported.excluded_by_tag} resource(s) by tag")

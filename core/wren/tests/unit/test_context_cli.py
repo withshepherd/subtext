@@ -58,6 +58,14 @@ def _make_dbt_project(tmp_path: Path) -> tuple[Path, Path]:
             {
                 "metadata": {"project_name": "jaffle_shop"},
                 "nodes": {
+                    "seed.jaffle_shop.countries": {
+                        "resource_type": "seed",
+                        "name": "countries",
+                        "database": "jaffle",
+                        "schema": "main",
+                        "config": {"materialized": "seed"},
+                        "tags": ["internal_seed"],
+                    },
                     "model.jaffle_shop.stg_orders": {
                         "resource_type": "model",
                         "name": "stg_orders",
@@ -160,6 +168,9 @@ def _make_dbt_project(tmp_path: Path) -> tuple[Path, Path]:
         json.dumps(
             {
                 "nodes": {
+                    "seed.jaffle_shop.countries": {
+                        "columns": {"code": {"type": "varchar", "index": 1}}
+                    },
                     "model.jaffle_shop.stg_orders": {
                         "columns": {
                             "order_id": {"type": "integer", "index": 1},
@@ -760,7 +771,12 @@ def test_upgrade_cli_v4_to_v5_dry_run_no_write(tmp_path):
 
 @pytest.mark.parametrize(
     "tags, excluded_count",
-    [([], 0), (["subtext_exclude"], 1), (["subtext_exclude", "reporting"], 2)],
+    [
+        ([], 0),
+        (["subtext_exclude"], 1),
+        (["subtext_exclude", "reporting"], 2),
+        (["internal_seed"], 1),
+    ],
 )
 def test_import_dbt_dry_run(tmp_path, tags, excluded_count):
     dbt_project, profiles_path = _make_dbt_project(tmp_path)
@@ -786,8 +802,17 @@ def test_import_dbt_dry_run(tmp_path, tags, excluded_count):
     assert result.exit_code == 0, result.output
     assert "Dry run" in result.output
     assert "wren_project.yml" in result.output
-    assert ("models/stg_orders/metadata.yml" in result.output) == (excluded_count == 0)
-    assert ("models/fct_orders/metadata.yml" in result.output) == (excluded_count < 2)
+    assert ("models/stg_orders/metadata.yml" in result.output) == (
+        "subtext_exclude" not in tags
+    )
+    assert ("models/fct_orders/metadata.yml" in result.output) == (
+        "reporting" not in tags
+    )
+    assert ("models/countries/metadata.yml" in result.output) == (
+        "internal_seed" not in tags
+    )
+    seed_count = int("internal_seed" not in tags)
+    assert f"{seed_count} seeds" in result.output
     assert f"excluded {excluded_count} resource(s) by tag" in result.output
     assert not output_dir.exists()
 
@@ -814,6 +839,8 @@ def test_import_dbt_writes_project_and_builds(tmp_path):
     assert result.exit_code == 0, result.output
     assert (output_dir / "wren_project.yml").exists()
     assert (output_dir / "models" / "fct_orders" / "metadata.yml").exists()
+    assert (output_dir / "models" / "countries" / "metadata.yml").exists()
+    assert "2 dbt models, 1 seeds, 0 sources" in result.output
     assert (output_dir / "relationships.yml").exists()
     assert (output_dir / "knowledge" / "rules" / "general.md").exists()
     assert list((output_dir / "knowledge" / "sql").glob("*.md"))  # seeded NL→SQL pairs
@@ -840,7 +867,20 @@ def test_import_dbt_writes_project_and_builds(tmp_path):
     )
     assert build.exit_code == 0, build.output
     mdl = json.loads((output_dir / "target" / "mdl.json").read_text())
-    assert {model["name"] for model in mdl["models"]} == {"fct_orders", "stg_orders"}
+    assert {model["name"] for model in mdl["models"]} == {
+        "fct_orders",
+        "stg_orders",
+        "countries",
+    }
+    seed = next(model for model in mdl["models"] if model["name"] == "countries")
+    assert seed["tableReference"] == {
+        "catalog": "jaffle",
+        "schema": "main",
+        "table": "countries",
+    }
+    assert seed["columns"][0]["name"] == "code"
+    assert seed["properties"]["dbtResourceType"] == "seed"
+    assert seed["properties"]["dbtLayer"] == "seed"
 
 
 def test_import_dbt_force_overwrites_managed_files(tmp_path):

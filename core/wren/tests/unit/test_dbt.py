@@ -399,15 +399,130 @@ class TestLoadDbtArtifacts:
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("explicit_attachment", [False, True])
+def test_import_seed_metadata_and_constraints(
+    tmp_path, monkeypatch, explicit_attachment
+):
+    project_dir, profiles_path = _write_basic_dbt_project(tmp_path)
+    monkeypatch.setenv("JAFFLE_DUCKDB_PATH", "warehouse/jaffle.duckdb")
+    manifest_path = project_dir / "build" / "manifest.json"
+    catalog_path = project_dir / "build" / "catalog.json"
+    seed_uid = "seed.jaffle_shop.countries"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["nodes"][seed_uid] = {
+        "resource_type": "seed",
+        "name": "countries",
+        "alias": "country_lookup",
+        "database": "warehouse",
+        "schema": "reference",
+        "description": "Country reference data",
+        "config": {"materialized": "seed"},
+        "columns": {
+            "code": {"description": "Country code", "data_type": "integer"},
+            "label": {"description": "Country name"},
+            "unbuilt_column": {"data_type": "integer"},
+        },
+    }
+    results = []
+    for test_name in ["not_null", "unique"]:
+        test_uid = f"test.jaffle_shop.{test_name}_countries_code"
+        manifest["nodes"][test_uid] = {
+            "resource_type": "test",
+            "depends_on": {"nodes": [seed_uid]},
+            "column_name": "code",
+            "test_metadata": {"name": test_name, "kwargs": {}},
+        }
+        if explicit_attachment:
+            manifest["nodes"][test_uid]["attached_node"] = seed_uid
+        results.append({"unique_id": test_uid, "status": "pass"})
+    manifest_path.write_text(json.dumps(manifest))
+    catalog = json.loads(catalog_path.read_text())
+    catalog["nodes"][seed_uid] = {
+        "columns": {
+            "label": {"type": "varchar", "index": 2},
+            "code": {"type": "varchar", "index": 1},
+        }
+    }
+    catalog_path.write_text(json.dumps(catalog))
+    (project_dir / "build" / "run_results.json").write_text(
+        json.dumps({"results": results})
+    )
+
+    imported = convert_dbt_project_to_wren_project(
+        project_dir, profiles_path=profiles_path
+    )
+    files = {file.relative_path: file.content for file in imported.files}
+    assert "models/country_lookup/metadata.yml" in files
+    seed = yaml.safe_load(files["models/country_lookup/metadata.yml"])
+    assert seed["name"] == "country_lookup"
+    assert seed["table_reference"] == {
+        "catalog": "warehouse",
+        "schema": "reference",
+        "table": "country_lookup",
+    }
+    assert "ref_sql" not in seed
+    assert seed["properties"] == {
+        "description": "Country reference data",
+        "dbt_layer": "seed",
+        "dbt_unique_id": seed_uid,
+        "dbt_resource_type": "seed",
+    }
+    assert [column["name"] for column in seed["columns"]] == ["code", "label"]
+    code = seed["columns"][0]
+    assert code["type"] == "TEXT"
+    assert code["properties"]["description"] == "Country code"
+    assert code["properties"]["dbt_test_status"] == "verified"
+    assert code["not_null"] is True
+    assert code["is_primary_key"] is True
+    assert seed["primary_key"] == "code"
+    assert imported.model_count == 1
+    assert imported.seed_count == 1
+    assert imported.source_count == 0
+    rules = files["knowledge/rules/general.md"]
+    assert "imported seeds: 1" in rules
+    assert "country_lookup.code: NOT NULL, UNIQUE (primary key)" in rules
+    assert any(
+        "country_lookup" in content
+        for path, content in files.items()
+        if path.startswith("knowledge/sql/")
+    )
+
+
+@pytest.mark.unit
+def test_import_skips_seed_without_columns(tmp_path, monkeypatch):
+    project_dir, profiles_path = _write_basic_dbt_project(tmp_path)
+    monkeypatch.setenv("JAFFLE_DUCKDB_PATH", "warehouse/jaffle.duckdb")
+    manifest_path = project_dir / "build" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["nodes"]["seed.jaffle_shop.countries"] = {
+        "resource_type": "seed",
+        "name": "countries",
+    }
+    manifest_path.write_text(json.dumps(manifest))
+
+    imported = convert_dbt_project_to_wren_project(
+        project_dir, profiles_path=profiles_path
+    )
+
+    assert imported.skipped_without_columns == 1
+    assert imported.seed_count == 0
+    assert {
+        file.relative_path
+        for file in imported.files
+        if file.relative_path.startswith("models/")
+    } == {"models/orders/metadata.yml"}
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     "exclude_tags, excluded_names",
     [
         (None, set()),
         ([], set()),
-        (["subtext_exclude"], {"orders"}),
+        (["subtext_exclude"], {"orders", "countries"}),
         (["private"], {"raw_internal"}),
-        (["subtext_exclude", "private"], {"orders", "raw_internal"}),
-        (["subtext_exclude", "subtext_exclude"], {"orders"}),
+        (["subtext_exclude", "private"], {"orders", "countries", "raw_internal"}),
+        (["subtext_exclude", "subtext_exclude"], {"orders", "countries"}),
     ],
 )
 def test_import_excludes_tags_without_cascading(
@@ -419,6 +534,7 @@ def test_import_excludes_tags_without_cascading(
     manifest = json.loads(manifest_path.read_text())
     orders_uid = "model.jaffle_shop.orders"
     report_uid = "model.jaffle_shop.report"
+    seed_uid = "seed.jaffle_shop.countries"
     # Resolved manifest tags include inherited config; no source YAML is needed.
     manifest["nodes"][orders_uid]["tags"] = ["subtext_exclude"]
     manifest["nodes"][report_uid] = {
@@ -428,7 +544,13 @@ def test_import_excludes_tags_without_cascading(
         "database": "warehouse",
         "schema": "mart",
         "config": {"materialized": "table"},
-        "depends_on": {"nodes": [orders_uid]},
+        "depends_on": {"nodes": [orders_uid, seed_uid]},
+        "columns": {"id": {"data_type": "integer"}},
+    }
+    manifest["nodes"][seed_uid] = {
+        "resource_type": "seed",
+        "name": "countries",
+        "tags": ["subtext_exclude"],
         "columns": {"id": {"data_type": "integer"}},
     }
     manifest["sources"] = {
@@ -443,7 +565,7 @@ def test_import_excludes_tags_without_cascading(
             ("customers", ["Subtext_exclude", "subtext_exclude_extra"]),
         ]
     }
-    for target_uid in [orders_uid, *manifest["sources"]]:
+    for target_uid in [orders_uid, seed_uid, *manifest["sources"]]:
         manifest["nodes"][f"test.relationships.{target_uid}"] = {
             "resource_type": "test",
             "attached_node": report_uid,
@@ -460,6 +582,7 @@ def test_import_excludes_tags_without_cascading(
     retained_names = {
         "orders",
         "orders_report",
+        "countries",
         "raw_internal",
         "raw_customers",
     } - excluded_names
@@ -468,6 +591,7 @@ def test_import_excludes_tags_without_cascading(
     }
     assert imported.excluded_by_tag == len(excluded_names)
     assert imported.model_count == 2 - ("orders" in excluded_names)
+    assert imported.seed_count == 1 - ("countries" in excluded_names)
     assert imported.source_count == 2 - ("raw_internal" in excluded_names)
     report = yaml.safe_load(files["models/orders_report/metadata.yml"])
     assert report["table_reference"] == {
