@@ -1,6 +1,6 @@
 # dbt Integration
 
-Import a dbt project into Wren AI to query dbt models through the Wren context layer.
+Import a dbt project into Wren AI to query dbt models, seeds, and sources through the Wren context layer.
 
 ## What Wren Imports
 
@@ -15,7 +15,7 @@ Wren stores imported dbt context in regular Wren project files:
 | dbt input | Wren output | Why it matters |
 |-----------|-------------|----------------|
 | Active dbt target | Wren connection profile | Reuses the same warehouse connection target dbt uses |
-| Model and source nodes | `models/*/metadata.yml` | Preserves model names, table references, descriptions, layers, and columns |
+| Model, seed, and source nodes | `models/*/metadata.yml` | Preserves model names, table references, descriptions, layers, and columns |
 | `relationships` tests | `relationships.yml` | Turns tested dbt refs into explicit Wren join paths |
 | `not_null`, `unique`, `accepted_values` tests | Model and column metadata | Gives agents verified constraints and useful filter values |
 | Test results | `knowledge/rules/general.md` | Surfaces verified constraints and warnings for agent workflows |
@@ -99,7 +99,7 @@ Generated files:
 | File | Description |
 |------|-------------|
 | `wren_project.yml` | Project metadata, data source, and dbt binding |
-| `models/*/metadata.yml` | Imported dbt models and sources |
+| `models/*/metadata.yml` | Imported dbt models, seeds, and sources |
 | `relationships.yml` | Joins inferred from dbt `relationships` tests |
 | `knowledge/rules/general.md` | dbt test summary, verified constraints, and warnings |
 | `AGENTS.md` | Agent workflow guidance |
@@ -107,13 +107,19 @@ Generated files:
 
 The importer skips ephemeral models, nodes without catalog columns, and manifest-only columns that are not present in `catalog.json`.
 
-### Exclude Models and Sources by Tag
+Seeds are included automatically as queryable models backed by their warehouse
+tables. Their metadata retains `dbt_resource_type: seed` and `dbt_layer: seed`;
+descriptions, column types, and dbt tests use the same import path as models.
+The import summary reports models, seeds, and sources separately. Snapshot
+nodes are skipped.
 
-Use the optional, repeatable `--exclude-tag` flag to omit models and sources
+### Exclude Models, Seeds, and Sources by Tag
+
+Use the optional, repeatable `--exclude-tag` flag to omit models, seeds, and sources
 whose resolved tags in `manifest.json` match any supplied tag exactly. This
-includes tags inherited through dbt configuration. Without the flag, the
-importer keeps its existing selection behavior. `subtext_exclude` is a suggested
-convention; the importer has no default exclusion tag.
+includes tags inherited through dbt configuration. Without the flag, models,
+seeds, and sources are included regardless of their tags. `subtext_exclude` is
+a suggested convention; the importer has no default exclusion tag.
 
 For example, tag an internal model in a dbt model properties YAML file:
 
@@ -123,6 +129,9 @@ models:
     config:
       tags: [subtext_exclude]
 ```
+
+To exclude a seed, set `config.tags: [subtext_exclude]` under its entry in the
+`seeds:` properties list.
 
 Regenerate the dbt artifacts with `dbt build` and `dbt docs generate`, then import
 into a clean output directory:

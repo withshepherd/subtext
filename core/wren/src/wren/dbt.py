@@ -100,6 +100,7 @@ class DbtProjectImport:
     skipped_without_columns: int
     relationship_count: int = 0
     excluded_by_tag: int = 0
+    seed_count: int = 0
 
 
 def default_wren_profile_name(target: DbtTarget) -> str:
@@ -325,7 +326,7 @@ def convert_dbt_project_to_wren_project(
 ) -> DbtProjectImport:
     """Convert dbt artifacts into Wren project files.
 
-    Exclude models and sources whose resolved manifest tags match any
+    Exclude models, seeds, and sources whose resolved manifest tags match any
     ``exclude_tags`` entry exactly, without excluding their dependencies.
     """
     from wren.context import (  # noqa: PLC0415
@@ -350,6 +351,7 @@ def convert_dbt_project_to_wren_project(
         imported_models,
         model_count,
         source_count,
+        seed_count,
         skipped_ephemeral,
         skipped_no_columns,
         excluded_by_tag,
@@ -403,6 +405,7 @@ def convert_dbt_project_to_wren_project(
                 target,
                 model_count,
                 source_count,
+                seed_count,
                 relationships,
                 test_events,
                 artifacts.run_results is not None,
@@ -451,6 +454,7 @@ def convert_dbt_project_to_wren_project(
         files=files,
         model_count=model_count,
         source_count=source_count,
+        seed_count=seed_count,
         skipped_ephemeral=skipped_ephemeral,
         skipped_without_columns=skipped_no_columns,
         relationship_count=len(relationships),
@@ -700,7 +704,7 @@ def _build_imported_models(
     artifacts: DbtArtifacts,
     *,
     exclude_tags: set[str],
-) -> tuple[list[dict[str, Any]], int, int, int, int, int]:
+) -> tuple[list[dict[str, Any]], int, int, int, int, int, int]:
     manifest = artifacts.manifest
     catalog_nodes = artifacts.catalog.get("nodes", {})
     catalog_sources = artifacts.catalog.get("sources", {})
@@ -710,17 +714,23 @@ def _build_imported_models(
     used_names: set[str] = set()
     model_count = 0
     source_count = 0
+    seed_count = 0
     skipped_ephemeral = 0
     skipped_without_columns = 0
     excluded_by_tag = 0
 
     for unique_id, node in sorted(manifest.get("nodes", {}).items()):
-        if node.get("resource_type") != "model":
+        resource_type = node.get("resource_type")
+        if resource_type not in {"model", "seed"}:
             continue
         if exclude_tags.intersection(node.get("tags", [])):
             excluded_by_tag += 1
             continue
-        if str(node.get("config", {}).get("materialized", "")).lower() == "ephemeral":
+        if (
+            resource_type == "model"
+            and str(node.get("config", {}).get("materialized", "")).lower()
+            == "ephemeral"
+        ):
             skipped_ephemeral += 1
             continue
         model = _build_model_metadata(
@@ -728,7 +738,7 @@ def _build_imported_models(
             node=node,
             catalog_entry=catalog_nodes.get(unique_id, {}),
             wren_name=str(node.get("alias") or node.get("name") or ""),
-            dbt_resource_type="model",
+            dbt_resource_type=resource_type,
             type_dialect=type_dialect,
         )
         if model is None:
@@ -736,7 +746,10 @@ def _build_imported_models(
             continue
         _ensure_unique_model_name(model["name"], used_names)
         imported_models.append(model)
-        model_count += 1
+        if resource_type == "seed":
+            seed_count += 1
+        else:
+            model_count += 1
 
     for unique_id, node in sorted(manifest.get("sources", {}).items()):
         if exclude_tags.intersection(node.get("tags", [])):
@@ -762,6 +775,7 @@ def _build_imported_models(
         imported_models,
         model_count,
         source_count,
+        seed_count,
         skipped_ephemeral,
         skipped_without_columns,
         excluded_by_tag,
@@ -936,6 +950,8 @@ def infer_dbt_layer(node: dict[str, Any]) -> str:
     """Infer a dbt layer from resource metadata."""
     if node.get("resource_type") == "source":
         return "raw"
+    if node.get("resource_type") == "seed":
+        return "seed"
 
     fqn = [str(part).lower() for part in node.get("fqn", [])]
     name = str(node.get("name") or "").lower()
@@ -980,6 +996,7 @@ def _build_base_instructions(
     target: DbtTarget,
     model_count: int,
     source_count: int,
+    seed_count: int,
     relationships: list[dict[str, Any]],
     test_events: list[dict[str, Any]],
     has_run_results: bool,
@@ -990,6 +1007,7 @@ def _build_base_instructions(
         f"- dbt project: `{target.project.get('name', target.project_dir.name)}`",
         f"- dbt profile/target: `{target.profile_name}.{target.target_name}`",
         f"- imported models: {model_count}",
+        f"- imported seeds: {seed_count}",
         f"- imported sources: {source_count}",
         f"- imported relationships: {len(relationships)}",
         "",
@@ -1071,7 +1089,7 @@ def _normalize_test_status(status: Any) -> str:
 def _infer_attached_node(node: dict[str, Any]) -> str | None:
     depends_on = node.get("depends_on", {}) or {}
     for unique_id in depends_on.get("nodes", []):
-        if str(unique_id).startswith(("model.", "source.")):
+        if str(unique_id).startswith(("model.", "seed.", "source.")):
             return str(unique_id)
     return None
 
@@ -1097,7 +1115,9 @@ def _resolve_relationship_target_uid(
     depends_on = node.get("depends_on", {}) or {}
     for candidate in depends_on.get("nodes", []):
         candidate = str(candidate)
-        if candidate != attached_uid and candidate.startswith(("model.", "source.")):
+        if candidate != attached_uid and candidate.startswith(
+            ("model.", "seed.", "source.")
+        ):
             return candidate
     return None
 
